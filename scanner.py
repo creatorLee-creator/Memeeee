@@ -40,12 +40,14 @@ class Scanner:
         poll_interval_seconds: int,
         watch_timeout_seconds: int,
         protocol_filters: dict | None = None,
+        max_checks_per_tick: int = 5,
     ):
         self.bitquery = bitquery
         self.notifier = notifier
         self.state = state
         self.chains = chains
         self.protocol_filters = protocol_filters or {}
+        self.max_checks_per_tick = max_checks_per_tick
         self.num_buys_to_check = num_buys_to_check
         self.usd_threshold = usd_threshold
         self.poll_interval_seconds = poll_interval_seconds
@@ -93,8 +95,17 @@ class Scanner:
         self.state.save()
 
     async def _check_watched_tokens(self):
-        # Copy to avoid mutating dict while iterating
-        for key, watched in list(self.state.watching.items()):
+        # Oldest-watched first, capped per tick - with the Bitquery client now
+        # throttling itself to one request every few seconds, checking every
+        # watched token every tick would just queue up behind that throttle
+        # and the tick would never finish. Spreading the population across
+        # several ticks keeps each tick fast and keeps total requests/minute
+        # bounded regardless of how many tokens are being watched at once.
+        items = sorted(
+            self.state.watching.items(), key=lambda kv: kv[1].first_seen_at
+        )[: self.max_checks_per_tick]
+
+        for key, watched in items:
             try:
                 buys = await self.bitquery.first_buys(
                     watched.chain, watched.address, self.num_buys_to_check

@@ -40,6 +40,8 @@ class Config:
     usd_threshold: float = 5000.0
     poll_interval_seconds: int = 20
     watch_timeout_seconds: int = 1800
+    bitquery_min_seconds_between_requests: float = 3.0
+    max_checks_per_tick: int = 5
 
     @classmethod
     def load(cls) -> "Config":
@@ -77,4 +79,8 @@ class Config:
             usd_threshold=float(os.getenv("USD_THRESHOLD", "5000")),
             poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "20")),
             watch_timeout_seconds=int(os.getenv("WATCH_TIMEOUT_SECONDS", "1800")),
+            bitquery_min_seconds_between_requests=float(
+                os.getenv("BITQUERY_MIN_SECONDS_BETWEEN_REQUESTS", "3.0")
+            ),
+            max_checks_per_tick=int(os.getenv("MAX_CHECKS_PER_TICK", "5")),
         )

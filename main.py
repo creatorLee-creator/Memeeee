@@ -61,7 +61,10 @@ async def run():
         await app.updater.start_polling()
         log.info("Telegram bot polling started.")
 
-        async with BitqueryClient(cfg.bitquery_api_key) as bitquery:
+        async with BitqueryClient(
+            cfg.bitquery_api_key,
+            min_seconds_between_requests=cfg.bitquery_min_seconds_between_requests,
+        ) as bitquery:
             scanner = Scanner(
                 bitquery=bitquery,
                 notifier=notifier,
@@ -72,6 +75,7 @@ async def run():
                 poll_interval_seconds=cfg.poll_interval_seconds,
                 watch_timeout_seconds=cfg.watch_timeout_seconds,
                 protocol_filters=cfg.protocol_filters,
+                max_checks_per_tick=cfg.max_checks_per_tick,
             )
             try:
                 await scanner.run_forever()

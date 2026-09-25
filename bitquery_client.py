@@ -22,6 +22,7 @@ Key rules this file follows (from Bitquery's own docs):
     Pass a protocol_family to scope to just one launchpad (e.g. "Pump", "Bags", "Tolly") if you
     only want that launchpad's tokens rather than everything trading on the chain.
 """
+import asyncio
 import aiohttp
 
 BITQUERY_URL = "https://streaming.bitquery.io/graphql"
@@ -118,9 +119,16 @@ def _normalize_address(chain: str, address: str) -> str:
 
 
 class BitqueryClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, min_seconds_between_requests: float = 3.0):
         self.api_key = api_key
         self._session: aiohttp.ClientSession | None = None
+        # Self-throttle: never fire requests faster than this, regardless of how
+        # often the scanner asks. Trial/free Bitquery plans reject bursts with
+        # "access restricted by rate limit: too many requests per minute" - this
+        # spaces requests out so we stay under that instead of erroring on it.
+        self._min_seconds_between_requests = min_seconds_between_requests
+        self._last_request_at = 0.0
+        self._throttle_lock = asyncio.Lock()
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(
@@ -135,15 +143,37 @@ class BitqueryClient:
         if self._session:
             await self._session.close()
 
-    async def _query(self, query: str, variables: dict) -> dict:
+    async def _throttle(self):
+        async with self._throttle_lock:
+            now = asyncio.get_event_loop().time()
+            wait = self._last_request_at + self._min_seconds_between_requests - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request_at = asyncio.get_event_loop().time()
+
+    async def _query(self, query: str, variables: dict, retries: int = 4) -> dict:
         assert self._session is not None, "Use BitqueryClient as an async context manager"
-        async with self._session.post(
-            BITQUERY_URL, json={"query": query, "variables": variables}
-        ) as resp:
-            payload = await resp.json()
-            if "errors" in payload:
-                raise RuntimeError(f"Bitquery error: {payload['errors']}")
-            return payload["data"]
+        last_error = None
+        for attempt in range(retries):
+            await self._throttle()
+            async with self._session.post(
+                BITQUERY_URL, json={"query": query, "variables": variables}
+            ) as resp:
+                payload = await resp.json()
+                if "errors" in payload:
+                    messages = " ".join(
+                        str(e.get("message", e)) for e in payload["errors"]
+                    )
+                    if "rate limit" in messages.lower() and attempt < retries - 1:
+                        # Back off and try again rather than surfacing an error
+                        # for what's usually a transient, self-inflicted burst.
+                        backoff = 5 * (attempt + 1)
+                        last_error = messages
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise RuntimeError(f"Bitquery error: {payload['errors']}")
+                return payload["data"]
+        raise RuntimeError(f"Bitquery error (after {retries} retries): {last_error}")
 
     async def new_launches(
         self, chain: str, limit: int = 50, protocol_family: str | None = None
