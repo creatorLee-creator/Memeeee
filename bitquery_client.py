@@ -1,0 +1,201 @@
+"""
+Thin client around Bitquery's GraphQL API (https://streaming.bitquery.io/graphql).
+
+Built against Bitquery's own "V2 API cheat sheet" (docs.bitquery.io/docs/start/bitquery-for-ai),
+which documents a cross-chain `Trading` cube that covers Solana, Ethereum, Base, BSC, Arbitrum,
+Optimism, Polygon, Robinhood Chain and Arc with one identical query shape (just a different
+`Network` filter value). That's what this client uses for both "find new tokens" and "get a
+token's first N buys" - one code path for every chain instead of one per chain.
+
+Still verify in https://ide.bitquery.io before a real run (see README) - schemas move over time
+and this was written without a live key to test against.
+
+Key rules this file follows (from Bitquery's own docs):
+  - Use Trading.Trades for cross-chain trade data; filter Pair.Market.Network by the chain's
+    *display name* (case-sensitive): "Solana", "Ethereum", "Base", "Binance Smart Chain",
+    "Arbitrum", "Optimism", "Matic" (Polygon), "Robinhood", "Arc".
+  - EVM token addresses in the Trading cube must be lowercase or you silently get zero rows.
+    Solana mint addresses are base58 (mixed case is meaningful) and are NOT lowercased.
+  - Use AmountsInUsd.Quote for a trade's USD value, not AmountsInUsd.Base (the docs note .Base
+    uses a smoothed reference price that diverges from what was actually paid).
+  - pump.fun is a launchpad ON Solana, not a separate chain - it's covered by chain="solana".
+    Pass a protocol_family to scope to just one launchpad (e.g. "Pump", "Bags", "Tolly") if you
+    only want that launchpad's tokens rather than everything trading on the chain.
+"""
+import aiohttp
+
+BITQUERY_URL = "https://streaming.bitquery.io/graphql"
+
+# chain key (used in this project / .env) -> Bitquery's Trading-cube display name for Network
+NETWORK_DISPLAY_NAMES = {
+    "solana": "Solana",
+    "ethereum": "Ethereum",
+    "base": "Base",
+    "bsc": "Binance Smart Chain",
+    "arbitrum": "Arbitrum",
+    "optimism": "Optimism",
+    "polygon": "Matic",
+    "robinhood": "Robinhood",   # Robinhood Chain - RWA-focused L2, but also hosts memecoin
+                                 # launchpads (Pons, Flap.sh, Bags.fm)
+    "arc": "Arc",               # Circle's Arc L1 - hosts the Tolly memecoin launchpad
+}
+
+# Recently-traded tokens on a chain (candidates for "just launched").
+# We treat "first time our state store has seen this address" as the launch signal -
+# see scanner.py. Optionally narrow to one launchpad with protocol_family.
+RECENT_TRADES_QUERY = """
+query RecentTrades($network: String!, $limit: Int!) {
+  Trading {
+    Trades(
+      where: {
+        Pair: { Market: { Network: { is: $network } } }
+        Side: { is: "Buy" }
+      }
+      orderBy: { descending: Block_Time }
+      limit: { count: $limit }
+    ) {
+      Block { Time }
+      Pair {
+        Token { Address Symbol Name }
+        Market { ProtocolFamily }
+      }
+    }
+  }
+}
+"""
+
+RECENT_TRADES_BY_PROTOCOL_QUERY = """
+query RecentTradesByProtocol($network: String!, $protocolFamily: String!, $limit: Int!) {
+  Trading {
+    Trades(
+      where: {
+        Pair: {
+          Market: { Network: { is: $network }, ProtocolFamily: { is: $protocolFamily } }
+        }
+        Side: { is: "Buy" }
+      }
+      orderBy: { descending: Block_Time }
+      limit: { count: $limit }
+    ) {
+      Block { Time }
+      Pair {
+        Token { Address Symbol Name }
+      }
+    }
+  }
+}
+"""
+
+# Earliest buys of a specific token on a specific chain, oldest first.
+TOKEN_FIRST_BUYS_QUERY = """
+query TokenFirstBuys($token: String!, $network: String!, $limit: Int!) {
+  Trading {
+    Trades(
+      where: {
+        Pair: {
+          Token: { Address: { is: $token } }
+          Market: { Network: { is: $network } }
+        }
+        Side: { is: "Buy" }
+      }
+      orderBy: { ascending: Block_Time }
+      limit: { count: $limit }
+    ) {
+      Block { Time }
+      AmountsInUsd { Quote }
+    }
+  }
+}
+"""
+
+
+def _normalize_address(chain: str, address: str) -> str:
+    """EVM (0x...) addresses must be lowercase in the Trading cube. Solana mint
+    addresses are base58 and must be left as-is."""
+    if address.startswith("0x"):
+        return address.lower()
+    return address
+
+
+class BitqueryClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._session: aiohttp.ClientSession | None = None
+
+    async def __aenter__(self):
+        self._session = aiohttp.ClientSession(
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+        )
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._session:
+            await self._session.close()
+
+    async def _query(self, query: str, variables: dict) -> dict:
+        assert self._session is not None, "Use BitqueryClient as an async context manager"
+        async with self._session.post(
+            BITQUERY_URL, json={"query": query, "variables": variables}
+        ) as resp:
+            payload = await resp.json()
+            if "errors" in payload:
+                raise RuntimeError(f"Bitquery error: {payload['errors']}")
+            return payload["data"]
+
+    async def new_launches(
+        self, chain: str, limit: int = 50, protocol_family: str | None = None
+    ) -> list[dict]:
+        """Returns recently-traded tokens on `chain` as [{address, symbol, name}, ...].
+
+        If `protocol_family` is set (e.g. "Pump" for pump.fun on Solana, "Bags" or
+        "Tolly"), only trades on that launchpad are considered.
+        """
+        network = NETWORK_DISPLAY_NAMES.get(chain)
+        if not network:
+            raise ValueError(
+                f"Unsupported chain '{chain}'. Supported: {', '.join(NETWORK_DISPLAY_NAMES)}"
+            )
+
+        if protocol_family:
+            data = await self._query(
+                RECENT_TRADES_BY_PROTOCOL_QUERY,
+                {"network": network, "protocolFamily": protocol_family, "limit": limit},
+            )
+        else:
+            data = await self._query(
+                RECENT_TRADES_QUERY, {"network": network, "limit": limit}
+            )
+
+        trades = data["Trading"]["Trades"]
+        seen = {}
+        for t in trades:
+            token = t["Pair"]["Token"]
+            addr = token["Address"]
+            if addr not in seen:
+                seen[addr] = {
+                    "address": addr,
+                    "symbol": token.get("Symbol") or "?",
+                    "name": token.get("Name") or "?",
+                }
+        return list(seen.values())
+
+    async def first_buys(self, chain: str, address: str, limit: int) -> list[dict]:
+        """Returns up to `limit` earliest buys of `address` on `chain`, oldest first,
+        as [{"usd": float}, ...]."""
+        network = NETWORK_DISPLAY_NAMES.get(chain)
+        if not network:
+            raise ValueError(
+                f"Unsupported chain '{chain}'. Supported: {', '.join(NETWORK_DISPLAY_NAMES)}"
+            )
+        token = _normalize_address(chain, address)
+        data = await self._query(
+            TOKEN_FIRST_BUYS_QUERY, {"token": token, "network": network, "limit": limit}
+        )
+        trades = data["Trading"]["Trades"]
+        return [
+            {"usd": float((t.get("AmountsInUsd") or {}).get("Quote") or 0)}
+            for t in trades
+        ]
