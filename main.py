@@ -17,7 +17,6 @@ from state_store import StateStore
 from bitquery_client import BitqueryClient
 from telegram_notifier import TelegramNotifier
 from scanner import Scanner
-from scouts import Scouts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,17 +65,6 @@ async def run():
             cfg.bitquery_api_key,
             min_seconds_between_requests=cfg.bitquery_min_seconds_between_requests,
         ) as bitquery:
-            scanner = None
-            scouts = None
-            if cfg.scouts_enabled:
-                scouts = Scouts(
-                    bitquery=bitquery,
-                    notifier=notifier,
-                    state=state,
-                    chains=cfg.chains,
-                    near_grad_pct=cfg.near_grad_pct,
-                    grad_max_age_minutes=cfg.grad_max_age_minutes,
-                )
             scanner = Scanner(
                 bitquery=bitquery,
                 notifier=notifier,
@@ -89,13 +77,7 @@ async def run():
                 protocol_filters=cfg.protocol_filters,
                 max_checks_per_tick=cfg.max_checks_per_tick,
                 max_token_age_hours=cfg.max_token_age_hours,
-                exclude_name_patterns=cfg.exclude_name_patterns,
-                exclude_symbols=cfg.exclude_symbols,
-                scouts=scouts,
             )
-            if scouts is not None:
-                # Scouts skip tokenized stocks/stablecoins the same way.
-                scouts.excluded = scanner._is_excluded
             try:
                 await scanner.run_forever()
             except (KeyboardInterrupt, asyncio.CancelledError):

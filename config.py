@@ -13,18 +13,6 @@ load_dotenv()
 ALL_CHAINS = ["solana", "ethereum", "base", "bsc", "arbitrum", "optimism", "polygon", "robinhood", "arc"]
 
 
-# Tokens that are not memecoin launches: tokenized stocks and wrapped/bridged
-# assets (matched anywhere in the token's name, case-insensitive) and
-# stablecoins / majors (matched exactly on symbol). Override via env vars.
-DEFAULT_EXCLUDE_NAME_PATTERNS = (
-    "Robinhood Token,Backpack Securities,xStock,Tokenized,Wrapped,Bridged"
-)
-DEFAULT_EXCLUDE_SYMBOLS = (
-    "USDC,USDT,USDG,PYUSD,USDS,USDE,USD1,DAI,EURC,FDUSD,"
-    "SOL,WSOL,ETH,WETH,BTC,WBTC,CBBTC"
-)
-
-
 def _get_list(raw: str) -> list[str]:
     return [c.strip().lower() for c in raw.split(",") if c.strip()]
 
@@ -55,11 +43,6 @@ class Config:
     bitquery_min_seconds_between_requests: float = 3.0
     max_checks_per_tick: int = 5
     max_token_age_hours: float = 6.0
-    exclude_name_patterns: list = field(default_factory=list)
-    exclude_symbols: list = field(default_factory=list)
-    scouts_enabled: bool = True
-    near_grad_pct: float = 90.0
-    grad_max_age_minutes: float = 15.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -102,18 +85,4 @@ class Config:
             ),
             max_checks_per_tick=int(os.getenv("MAX_CHECKS_PER_TICK", "5")),
             max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "6.0")),
-            exclude_name_patterns=[
-                x.strip().lower() for x in os.getenv(
-                    "EXCLUDE_NAME_PATTERNS", DEFAULT_EXCLUDE_NAME_PATTERNS
-                ).split(",") if x.strip()
-            ],
-            scouts_enabled=os.getenv("SCOUTS_ENABLED", "true").strip().lower()
-            in ("1", "true", "yes", "on"),
-            near_grad_pct=float(os.getenv("NEAR_GRAD_PCT", "90")),
-            grad_max_age_minutes=float(os.getenv("GRAD_MAX_AGE_MINUTES", "15")),
-            exclude_symbols=[
-                x.strip().upper() for x in os.getenv(
-                    "EXCLUDE_SYMBOLS", DEFAULT_EXCLUDE_SYMBOLS
-                ).split(",") if x.strip()
-            ],
         )

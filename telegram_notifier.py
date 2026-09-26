@@ -35,13 +35,5 @@ class TelegramNotifier:
             disable_web_page_preview=False,
         )
 
-    async def send_html(self, text: str):
-        await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-
     async def send_text(self, text: str):
         await self.bot.send_message(chat_id=self.chat_id, text=text)

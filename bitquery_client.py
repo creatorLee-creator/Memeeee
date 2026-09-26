@@ -139,27 +139,6 @@ query TokenHasEarlierTrade($token: String!, $network: String!, $before: DateTime
 """
 
 
-TOKEN_INFO_QUERY = """
-query TokenInfo($token: String!, $network: String!) {
-  Trading {
-    Trades(
-      limit: { count: 1 }
-      orderBy: { descending: Block_Time }
-      where: {
-        Pair: {
-          Token: { Address: { is: $token } }
-          Market: { Network: { is: $network } }
-        }
-      }
-    ) {
-      PriceInUsd
-      Pair { Token { Symbol Name } }
-    }
-  }
-}
-"""
-
-
 def _normalize_address(chain: str, address: str) -> str:
     """EVM (0x...) addresses must be lowercase in the Trading cube. Solana mint
     addresses are base58 and must be left as-is."""
@@ -298,31 +277,6 @@ class BitqueryClient:
             }
             for t in trades
         ]
-
-    async def query(self, query: str, variables: dict | None = None) -> dict:
-        """Public wrapper so other modules (scouts.py) can run their own
-        queries through the same throttle/retry logic."""
-        return await self._query(query, variables or {})
-
-    async def token_info(self, chain: str, address: str) -> dict:
-        """Best-effort symbol/name/price lookup from the token's latest trade.
-        Returns {} if nothing is found."""
-        network = NETWORK_DISPLAY_NAMES.get(chain)
-        if not network:
-            return {}
-        data = await self._query(
-            TOKEN_INFO_QUERY,
-            {"token": _normalize_address(chain, address), "network": network},
-        )
-        rows = data["Trading"]["Trades"]
-        if not rows:
-            return {}
-        tok = rows[0]["Pair"]["Token"]
-        return {
-            "symbol": tok.get("Symbol") or "?",
-            "name": tok.get("Name") or "?",
-            "price_usd": rows[0].get("PriceInUsd"),
-        }
 
     async def has_earlier_trade(self, chain: str, address: str, before_iso: str) -> bool:
         """True if `address` on `chain` has any buy trade before `before_iso`
