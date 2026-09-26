@@ -43,7 +43,13 @@ class Scanner:
         protocol_filters: dict | None = None,
         max_checks_per_tick: int = 5,
         max_token_age_hours: float = 6.0,
+        exclude_name_patterns: list | None = None,
+        exclude_symbols: list | None = None,
+        scouts=None,
     ):
+        self.scouts = scouts
+        self.exclude_name_patterns = exclude_name_patterns or []
+        self.exclude_symbols = set(exclude_symbols or [])
         self.bitquery = bitquery
         self.notifier = notifier
         self.state = state
@@ -80,6 +86,8 @@ class Scanner:
             await self._discover_new_tokens(chain)
         await self._check_watched_tokens()
         self._expire_stale_watches()
+        if self.scouts is not None:
+            await self.scouts.run_once()
 
     async def _discover_new_tokens(self, chain: str):
         try:
@@ -93,6 +101,8 @@ class Scanner:
         for c in candidates:
             address = c["address"]
             if self.state.is_alerted(chain, address):
+                continue
+            if self._is_excluded(c.get("symbol") or "", c.get("name") or ""):
                 continue
             self.state.get_or_create_watch(chain, address, c["symbol"], c["name"])
         self.state.save()
@@ -142,6 +152,15 @@ class Scanner:
                     else self.state.drop_watch(watched.chain, watched.address)
                 self.state.save()
 
+    def _is_excluded(self, symbol: str, name: str) -> bool:
+        """Skip tokenized stocks, stablecoins and wrapped majors. These trade
+        heavily and can't be reliably told apart from new launches by trade
+        history on a realtime-only data plan, so filter them by name/symbol."""
+        if symbol.upper() in self.exclude_symbols:
+            return True
+        lname = name.lower()
+        return any(p in lname for p in self.exclude_name_patterns)
+
     async def _is_genuinely_new(self, watched) -> bool:
         """Authoritative "is this actually a new token" check. Trusting
         first_buys() to hand back a token's true earliest-ever trade turned
@@ -149,6 +168,20 @@ class Scanner:
         come back with a recent-looking "earliest" trade, faking freshness.
         Instead, directly ask: does ANY trade exist before our cutoff? If
         yes, it's not new, regardless of what first_buys returned."""
+        if watched.chain == "arc" and self.scouts is not None:
+            # Arc: a token is new only if a known Arc launchpad emitted a
+            # launch event for it recently. Doesn't depend on trade history.
+            try:
+                return await self.scouts.arc_recently_launched(
+                    watched.address, int(self.max_token_age_hours)
+                )
+            except Exception:
+                log.exception(
+                    "Arc launch check failed for %s - failing safe (no alert)",
+                    watched.address,
+                )
+                return False
+
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.max_token_age_hours)
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:

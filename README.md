@@ -13,6 +13,25 @@ Arc L1 (hosts the Tolly launchpad); pump.fun is a launchpad *on* Solana, not
 a separate chain, so it's covered by `solana` (optionally scope to just it —
 see `PROTOCOL_FILTERS` below).
 
+## Graduation scouts
+
+Besides the "first N buys" alerts, `scouts.py` sends three extra alert types:
+
+- **🔥 About to graduate (Solana / pump.fun)**: bonding curve at or above
+  `NEAR_GRAD_PCT` (default 90%).
+- **🎓 Just graduated to PumpSwap (Solana / pump.fun)**.
+- **🎓 Just graduated on Pons (Robinhood Chain)**.
+
+On **Arc**, no launchpad graduation data is documented yet, so Arc keeps the
+"first N buys" alerts, but a token only counts as new if an Arc launchpad
+(Argus, RadarDEX, Tolly, Warp, Archemist) emitted a launch event for it within
+`MAX_TOKEN_AGE_HOURS`.
+
+The queries come from Bitquery's docs but were not run live while being
+written. After deploying, search the Railway logs for `Scout` - a line like
+`Scout _solana_graduated failed` followed by a Bitquery error names the field
+to fix. One failing scout does not stop the others.
+
 ## How it works
 
 1. Every `POLL_INTERVAL_SECONDS`, it asks Bitquery for recently-traded new
