@@ -3,6 +3,7 @@ Core scanning logic, decoupled from Telegram/Bitquery specifics where possible.
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from bitquery_client import BitqueryClient
 from state_store import StateStore
@@ -41,6 +42,7 @@ class Scanner:
         watch_timeout_seconds: int,
         protocol_filters: dict | None = None,
         max_checks_per_tick: int = 5,
+        max_token_age_hours: float = 6.0,
     ):
         self.bitquery = bitquery
         self.notifier = notifier
@@ -48,6 +50,7 @@ class Scanner:
         self.chains = chains
         self.protocol_filters = protocol_filters or {}
         self.max_checks_per_tick = max_checks_per_tick
+        self.max_token_age_hours = max_token_age_hours
         self.num_buys_to_check = num_buys_to_check
         self.usd_threshold = usd_threshold
         self.poll_interval_seconds = poll_interval_seconds
@@ -116,19 +119,50 @@ class Scanner:
                 )
                 continue
 
-            watched.buys = [{"usd": b["usd"], "time": ""} for b in buys]
+            watched.buys = [{"usd": b["usd"], "time": b.get("time") or ""} for b in buys]
             self.state.save()
 
             if len(watched.buys) >= self.num_buys_to_check:
                 total = watched.total_usd()
-                if total >= self.usd_threshold:
+                is_fresh = self._is_genuinely_new(watched)
+                if total >= self.usd_threshold and is_fresh:
                     await self._fire_alert(watched, total)
+                elif total >= self.usd_threshold and not is_fresh:
+                    log.info(
+                        "Skipping alert for %s/%s: cleared $ threshold but first "
+                        "trade (%s) is older than %.1fh - not a new launch",
+                        watched.chain, watched.address, watched.buys[0]["time"],
+                        self.max_token_age_hours,
+                    )
                 # Whether it passed the bar or not, we've now evaluated the
                 # first N buys — stop watching either way so we don't keep
                 # re-querying it forever.
                 self.state.mark_alerted(watched.chain, watched.address) if total >= self.usd_threshold \
                     else self.state.drop_watch(watched.chain, watched.address)
                 self.state.save()
+
+    def _is_genuinely_new(self, watched) -> bool:
+        """The state store only knows a token is 'new to us' - that resets on
+        every redeploy, so on its own it's not reliable. This checks the
+        token's actual first-ever trade time (from the ascending-order buys
+        query, so buys[0] IS the earliest trade Bitquery has for it) against
+        a real age cutoff, so an established token isn't mistaken for a
+        fresh launch just because the bot forgot it existed."""
+        if not watched.buys:
+            return False
+        first_trade_time = watched.buys[0].get("time")
+        if not first_trade_time:
+            # No timestamp came back - fail safe by not alerting rather than
+            # risk a false positive on an old token.
+            return False
+        try:
+            ts = datetime.fromisoformat(first_trade_time.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+        return age_hours <= self.max_token_age_hours
 
     async def _fire_alert(self, watched, total_usd: float):
         log.info(

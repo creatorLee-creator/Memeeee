@@ -42,6 +42,7 @@ class Config:
     watch_timeout_seconds: int = 1800
     bitquery_min_seconds_between_requests: float = 3.0
     max_checks_per_tick: int = 5
+    max_token_age_hours: float = 6.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -83,4 +84,5 @@ class Config:
                 os.getenv("BITQUERY_MIN_SECONDS_BETWEEN_REQUESTS", "3.0")
             ),
             max_checks_per_tick=int(os.getenv("MAX_CHECKS_PER_TICK", "5")),
+            max_token_age_hours=float(os.getenv("MAX_TOKEN_AGE_HOURS", "6.0")),
         )

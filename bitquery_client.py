@@ -226,6 +226,9 @@ class BitqueryClient:
         )
         trades = data["Trading"]["Trades"]
         return [
-            {"usd": float((t.get("AmountsInUsd") or {}).get("Quote") or 0)}
+            {
+                "usd": float((t.get("AmountsInUsd") or {}).get("Quote") or 0),
+                "time": (t.get("Block") or {}).get("Time"),
+            }
             for t in trades
         ]

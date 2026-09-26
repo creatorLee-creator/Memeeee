@@ -76,6 +76,7 @@ async def run():
                 watch_timeout_seconds=cfg.watch_timeout_seconds,
                 protocol_filters=cfg.protocol_filters,
                 max_checks_per_tick=cfg.max_checks_per_tick,
+                max_token_age_hours=cfg.max_token_age_hours,
             )
             try:
                 await scanner.run_forever()
