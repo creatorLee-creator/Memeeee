@@ -23,6 +23,8 @@ Key rules this file follows (from Bitquery's own docs):
     only want that launchpad's tokens rather than everything trading on the chain.
 """
 import asyncio
+from datetime import datetime, timedelta, timezone
+
 import aiohttp
 
 BITQUERY_URL = "https://streaming.bitquery.io/graphql"
@@ -45,12 +47,13 @@ NETWORK_DISPLAY_NAMES = {
 # We treat "first time our state store has seen this address" as the launch signal -
 # see scanner.py. Optionally narrow to one launchpad with protocol_family.
 RECENT_TRADES_QUERY = """
-query RecentTrades($network: String!, $limit: Int!) {
+query RecentTrades($network: String!, $limit: Int!, $since: DateTime!) {
   Trading {
     Trades(
       where: {
         Pair: { Market: { Network: { is: $network } } }
         Side: { is: "Buy" }
+        Block: { Time: { since: $since } }
       }
       orderBy: { descending: Block_Time }
       limit: { count: $limit }
@@ -66,7 +69,7 @@ query RecentTrades($network: String!, $limit: Int!) {
 """
 
 RECENT_TRADES_BY_PROTOCOL_QUERY = """
-query RecentTradesByProtocol($network: String!, $protocolFamily: String!, $limit: Int!) {
+query RecentTradesByProtocol($network: String!, $protocolFamily: String!, $limit: Int!, $since: DateTime!) {
   Trading {
     Trades(
       where: {
@@ -74,6 +77,7 @@ query RecentTradesByProtocol($network: String!, $protocolFamily: String!, $limit
           Market: { Network: { is: $network }, ProtocolFamily: { is: $protocolFamily } }
         }
         Side: { is: "Buy" }
+        Block: { Time: { since: $since } }
       }
       orderBy: { descending: Block_Time }
       limit: { count: $limit }
@@ -144,8 +148,14 @@ def _normalize_address(chain: str, address: str) -> str:
 
 
 class BitqueryClient:
-    def __init__(self, api_key: str, min_seconds_between_requests: float = 3.0):
+    def __init__(
+        self,
+        api_key: str,
+        min_seconds_between_requests: float = 3.0,
+        discovery_window_minutes: int = 10,
+    ):
         self.api_key = api_key
+        self.discovery_window_minutes = discovery_window_minutes
         self._session: aiohttp.ClientSession | None = None
         # Self-throttle: never fire requests faster than this, regardless of how
         # often the scanner asks. Trial/free Bitquery plans reject bursts with
@@ -189,7 +199,9 @@ class BitqueryClient:
                     messages = " ".join(
                         str(e.get("message", e)) for e in payload["errors"]
                     )
-                    if "rate limit" in messages.lower() and attempt < retries - 1:
+                    lower = messages.lower()
+                    retryable = "rate limit" in lower or "deadline exceeded" in lower
+                    if retryable and attempt < retries - 1:
                         # Back off and try again rather than surfacing an error
                         # for what's usually a transient, self-inflicted burst.
                         backoff = 5 * (attempt + 1)
@@ -214,14 +226,22 @@ class BitqueryClient:
                 f"Unsupported chain '{chain}'. Supported: {', '.join(NETWORK_DISPLAY_NAMES)}"
             )
 
+        # Only look at the last few minutes of trades. Without a time window
+        # this query scans the chain's whole trade history ordered by time,
+        # which is heavy enough that Bitquery sometimes times out on it.
+        since = (
+            datetime.now(timezone.utc) - timedelta(minutes=self.discovery_window_minutes)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         if protocol_family:
             data = await self._query(
                 RECENT_TRADES_BY_PROTOCOL_QUERY,
-                {"network": network, "protocolFamily": protocol_family, "limit": limit},
+                {"network": network, "protocolFamily": protocol_family,
+                 "limit": limit, "since": since},
             )
         else:
             data = await self._query(
-                RECENT_TRADES_QUERY, {"network": network, "limit": limit}
+                RECENT_TRADES_QUERY, {"network": network, "limit": limit, "since": since}
             )
 
         trades = data["Trading"]["Trades"]
