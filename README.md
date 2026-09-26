@@ -104,7 +104,16 @@ it:
 3. If you get a field-not-found error, it names the bad field exactly —
    a quick fix in that one file.
 
-This is a 5-minute check the first time; the same two queries cover every
+One query is less certain and worth checking specifically:
+`TOKEN_HAS_EARLIER_TRADE_QUERY` filters `Block: { Time: { before: $before } }`
+to check whether a token has any trade before a cutoff time (this is what
+keeps established tokens like stablecoins from being mistaken for new
+launches). The `before` operator name for a DateTime field is a guess based
+on the pattern of other filters in this schema (`is`/`in`/`notIn`) - if the
+IDE rejects it, it's likely called `till`, `lt`, or similar instead; the
+error will name the field it doesn't recognize.
+
+This is a 5-minute check the first time; the same queries cover every
 chain, so you only need to do it once, not once per chain.
 
 ## Tuning

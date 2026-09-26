@@ -3,7 +3,7 @@ Core scanning logic, decoupled from Telegram/Bitquery specifics where possible.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bitquery_client import BitqueryClient
 from state_store import StateStore
@@ -124,15 +124,16 @@ class Scanner:
 
             if len(watched.buys) >= self.num_buys_to_check:
                 total = watched.total_usd()
-                is_fresh = self._is_genuinely_new(watched)
+                is_fresh = True
+                if total >= self.usd_threshold:
+                    is_fresh = await self._is_genuinely_new(watched)
                 if total >= self.usd_threshold and is_fresh:
                     await self._fire_alert(watched, total)
                 elif total >= self.usd_threshold and not is_fresh:
                     log.info(
-                        "Skipping alert for %s/%s: cleared $ threshold but first "
-                        "trade (%s) is older than %.1fh - not a new launch",
-                        watched.chain, watched.address, watched.buys[0]["time"],
-                        self.max_token_age_hours,
+                        "Skipping alert for %s/%s: cleared $ threshold but has "
+                        "trade history older than %.1fh - not a new launch",
+                        watched.chain, watched.address, self.max_token_age_hours,
                     )
                 # Whether it passed the bar or not, we've now evaluated the
                 # first N buys — stop watching either way so we don't keep
@@ -141,28 +142,26 @@ class Scanner:
                     else self.state.drop_watch(watched.chain, watched.address)
                 self.state.save()
 
-    def _is_genuinely_new(self, watched) -> bool:
-        """The state store only knows a token is 'new to us' - that resets on
-        every redeploy, so on its own it's not reliable. This checks the
-        token's actual first-ever trade time (from the ascending-order buys
-        query, so buys[0] IS the earliest trade Bitquery has for it) against
-        a real age cutoff, so an established token isn't mistaken for a
-        fresh launch just because the bot forgot it existed."""
-        if not watched.buys:
-            return False
-        first_trade_time = watched.buys[0].get("time")
-        if not first_trade_time:
-            # No timestamp came back - fail safe by not alerting rather than
-            # risk a false positive on an old token.
-            return False
+    async def _is_genuinely_new(self, watched) -> bool:
+        """Authoritative "is this actually a new token" check. Trusting
+        first_buys() to hand back a token's true earliest-ever trade turned
+        out to be unreliable - an established token (e.g. a stablecoin) can
+        come back with a recent-looking "earliest" trade, faking freshness.
+        Instead, directly ask: does ANY trade exist before our cutoff? If
+        yes, it's not new, regardless of what first_buys returned."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.max_token_age_hours)
+        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            ts = datetime.fromisoformat(first_trade_time.replace("Z", "+00:00"))
-        except ValueError:
+            has_earlier = await self.bitquery.has_earlier_trade(
+                watched.chain, watched.address, cutoff_iso
+            )
+        except Exception:
+            log.exception(
+                "Failed to check trade history for %s/%s - failing safe (no alert)",
+                watched.chain, watched.address,
+            )
             return False
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
-        return age_hours <= self.max_token_age_hours
+        return not has_earlier
 
     async def _fire_alert(self, watched, total_usd: float):
         log.info(

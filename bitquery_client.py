@@ -109,6 +109,31 @@ query TokenFirstBuys($token: String!, $network: String!, $limit: Int!) {
 }
 """
 
+# Existence check only: does this token have ANY trade before `before`? Used
+# to confirm a token is genuinely new rather than trusting "earliest trade we
+# got back" - which can look recent for an old, established token if the API
+# doesn't hand back its full history on this query shape/plan. limit:{count:1}
+# keeps this cheap; we only care whether the result set is empty or not.
+TOKEN_HAS_EARLIER_TRADE_QUERY = """
+query TokenHasEarlierTrade($token: String!, $network: String!, $before: DateTime!) {
+  Trading {
+    Trades(
+      where: {
+        Pair: {
+          Token: { Address: { is: $token } }
+          Market: { Network: { is: $network } }
+        }
+        Side: { is: "Buy" }
+        Block: { Time: { before: $before } }
+      }
+      limit: { count: 1 }
+    ) {
+      Block { Time }
+    }
+  }
+}
+"""
+
 
 def _normalize_address(chain: str, address: str) -> str:
     """EVM (0x...) addresses must be lowercase in the Trading cube. Solana mint
@@ -232,3 +257,21 @@ class BitqueryClient:
             }
             for t in trades
         ]
+
+    async def has_earlier_trade(self, chain: str, address: str, before_iso: str) -> bool:
+        """True if `address` on `chain` has any buy trade before `before_iso`
+        (an ISO 8601 timestamp). This is the authoritative "is this actually a
+        new token" check - it doesn't depend on the API handing back a
+        token's true full history via first_buys, only on whether anything
+        exists strictly before the cutoff."""
+        network = NETWORK_DISPLAY_NAMES.get(chain)
+        if not network:
+            raise ValueError(
+                f"Unsupported chain '{chain}'. Supported: {', '.join(NETWORK_DISPLAY_NAMES)}"
+            )
+        token = _normalize_address(chain, address)
+        data = await self._query(
+            TOKEN_HAS_EARLIER_TRADE_QUERY,
+            {"token": token, "network": network, "before": before_iso},
+        )
+        return len(data["Trading"]["Trades"]) > 0
